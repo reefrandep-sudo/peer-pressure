@@ -104,11 +104,10 @@ async function loadUsername(user) {
 }
 
 function getAuthRedirectUrl() {
-  if (window.location.origin === "null") {
-    return "https://jamesbrooks010.github.io/peer-pressure/auth.html";
-  }
+  const configuredUrl = window.PEER_PRESSURE_SUPABASE && window.PEER_PRESSURE_SUPABASE.authRedirectUrl;
+  if (configuredUrl) return configuredUrl;
 
-  return `${window.location.origin}${window.location.pathname.replace("signup.html", "auth.html")}`;
+  return new URL("auth.html", window.location.href).toString();
 }
 
 function friendlyAuthError(message) {

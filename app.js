@@ -4,17 +4,28 @@ const FOLLOW_KEY = "peerPressureFollowedMarkets";
 const INVITE_KEY = "peerPressureInviteCodes";
 const HIDDEN_PLATFORM_FEE = 2;
 const HIDDEN_ODDS_RAKE = 3;
+const marketMath = window.PeerPressureMath;
 
 const pageParams = new URLSearchParams(window.location.search);
 const detailMarketId = pageParams.get("id") || "";
 const isDetailPage = Boolean(detailMarketId);
 
+function relativeLocalDate({ days = 0, hours = 0, minutes = 0 }) {
+  const date = new Date();
+  date.setSeconds(0, 0);
+  date.setDate(date.getDate() + days);
+  date.setHours(date.getHours() + hours);
+  date.setMinutes(date.getMinutes() + minutes);
+  const local = new Date(date.getTime() - date.getTimezoneOffset() * 60000);
+  return local.toISOString().slice(0, 16);
+}
+
 const defaultMarkets = [
   {
-    id: crypto.randomUUID(),
+    id: "demo-sam-call",
     question: "Will Sam call us today?",
-    deadline: "2026-04-25T23:59",
-    cutoff: "2026-04-25T20:00",
+    deadline: relativeLocalDate({ days: 1, hours: 10 }),
+    cutoff: relativeLocalDate({ days: 1, hours: 6 }),
     umpire: "Alex",
     minStake: 5,
     platformFee: HIDDEN_PLATFORM_FEE,
@@ -25,16 +36,16 @@ const defaultMarkets = [
     status: "OPEN",
     outcome: "",
     entries: [
-      { id: crypto.randomUUID(), person: "You", side: "YES", amount: 10 },
-      { id: crypto.randomUUID(), person: "Jordan", side: "NO", amount: 10 },
-      { id: crypto.randomUUID(), person: "Taylor", side: "YES", amount: 5 }
+      { id: "demo-sam-you-yes", person: "You", side: "YES", amount: 10 },
+      { id: "demo-sam-jordan-no", person: "Jordan", side: "NO", amount: 10 },
+      { id: "demo-sam-taylor-yes", person: "Taylor", side: "YES", amount: 5 }
     ]
   },
   {
-    id: crypto.randomUUID(),
+    id: "demo-friday-dinner",
     question: "Will the group dinner happen this Friday?",
-    deadline: "2026-05-01T21:00",
-    cutoff: "2026-05-01T12:00",
+    deadline: relativeLocalDate({ days: 3, hours: 8 }),
+    cutoff: relativeLocalDate({ days: 3, hours: 2 }),
     umpire: "Mia",
     minStake: 5,
     platformFee: HIDDEN_PLATFORM_FEE,
@@ -45,18 +56,21 @@ const defaultMarkets = [
     status: "OPEN",
     outcome: "",
     entries: [
-      { id: crypto.randomUUID(), person: "You", side: "NO", amount: 20 },
-      { id: crypto.randomUUID(), person: "Mia", side: "YES", amount: 15 }
+      { id: "demo-dinner-you-no", person: "You", side: "NO", amount: 20 },
+      { id: "demo-dinner-mia-yes", person: "Mia", side: "YES", amount: 15 }
     ]
   }
 ];
 
 let markets = [];
-let activeFilter = "all";
+let activeFilter = "open";
 let dbClient = null;
 let realtimeChannel = null;
 let isSharedMode = false;
 let currentUserId = "";
+let walletBalance = null;
+let walletTransactions = [];
+let walletError = "";
 
 const money = new Intl.NumberFormat("en-AU", {
   style: "currency",
@@ -69,6 +83,10 @@ const marketList = document.querySelector("#marketList");
 const template = document.querySelector("#marketCardTemplate");
 const connectionStatus = document.querySelector("#connectionStatus");
 const inviteForm = document.querySelector("#inviteForm");
+const walletBalanceRead = document.querySelector("#walletBalance");
+const walletPanelBalance = document.querySelector("#walletPanelBalance");
+const walletPanelRead = document.querySelector("#walletPanelRead");
+const walletTransactionsList = document.querySelector("#walletTransactions");
 
 document.body.classList.toggle("detail-mode", isDetailPage);
 document.body.classList.toggle("list-mode", !isDetailPage);
@@ -95,6 +113,12 @@ if (marketForm) {
       outcome: "",
       entries: []
     };
+
+    const validationError = validateMarket(market);
+    if (validationError) {
+      setConnection(validationError, "error");
+      return;
+    }
 
     let created = true;
     if (isSharedMode) {
@@ -148,11 +172,13 @@ async function boot() {
     setConnection("Connecting to shared markets...", "live");
     const user = await getSignedInUser();
     currentUserId = user ? user.id : "";
+    await loadWallet();
     await loadSharedMarkets();
     subscribeToSharedChanges();
   } else {
     markets = loadLocalMarkets();
     setConnection("Demo mode: bets are saved on this device.", "");
+    renderWallet();
     render();
   }
 }
@@ -170,6 +196,40 @@ async function getSignedInUser() {
   if (!dbClient) return null;
   const { data } = await dbClient.auth.getUser();
   return data && data.user ? data.user : null;
+}
+
+async function loadWallet() {
+  if (!isSharedMode || !currentUserId) {
+    walletBalance = null;
+    walletTransactions = [];
+    walletError = "";
+    renderWallet();
+    return;
+  }
+
+  const { data, error } = await dbClient.rpc("ensure_test_wallet");
+  if (error) {
+    walletBalance = null;
+    walletTransactions = [];
+    walletError = `Wallet unavailable: ${error.message}`;
+    renderWallet();
+    return;
+  }
+
+  walletBalance = Number(data || 0);
+  walletError = "";
+  await loadWalletTransactions();
+  renderWallet();
+}
+
+async function loadWalletTransactions() {
+  const { data, error } = await dbClient
+    .from("wallet_transactions")
+    .select("transaction_type, amount, balance_after, note, created_at")
+    .order("created_at", { ascending: false })
+    .limit(8);
+
+  walletTransactions = error ? [] : data || [];
 }
 
 async function loadSharedMarkets() {
@@ -199,6 +259,8 @@ function subscribeToSharedChanges() {
     .on("postgres_changes", { event: "*", schema: "public", table: "markets" }, loadSharedMarkets)
     .on("postgres_changes", { event: "*", schema: "public", table: "entries" }, loadSharedMarkets)
     .on("postgres_changes", { event: "*", schema: "public", table: "market_participants" }, loadSharedMarkets)
+    .on("postgres_changes", { event: "*", schema: "public", table: "wallets" }, loadWallet)
+    .on("postgres_changes", { event: "*", schema: "public", table: "wallet_transactions" }, loadWallet)
     .subscribe();
 }
 
@@ -232,6 +294,12 @@ async function createSharedEntry(market, entry) {
     return;
   }
 
+  const joinMessage = marketJoinBlockReason(market);
+  if (joinMessage) {
+    setConnection(joinMessage, "error");
+    return;
+  }
+
   currentUserId = user.id;
   const person = currentDisplayName();
   const existingSide = sideForCurrentUser(market, person, user.id);
@@ -240,12 +308,10 @@ async function createSharedEntry(market, entry) {
     return;
   }
 
-  const { error } = await dbClient.from("entries").insert({
-    market_id: market.id,
-    user_id: user.id,
-    person,
-    side: entry.side,
-    amount: entry.amount
+  const { error } = await dbClient.rpc("place_test_bet", {
+    target_market_id: market.id,
+    selected_side: entry.side,
+    stake_amount: entry.amount
   });
 
   if (error) {
@@ -253,6 +319,7 @@ async function createSharedEntry(market, entry) {
     return;
   }
 
+  await loadWallet();
   await loadSharedMarkets();
 }
 
@@ -271,22 +338,24 @@ async function joinSharedInvite(code) {
 }
 
 async function resolveSharedMarket(market, outcome) {
-  const { error } = await dbClient
-    .from("markets")
-    .update({ status: "SETTLED", outcome })
-    .eq("id", market.id);
+  const { error } = await dbClient.rpc("resolve_market_with_test_wallets", {
+    target_market_id: market.id,
+    result: outcome
+  });
 
   if (error) {
     setConnection(`Could not resolve bet: ${error.message}`, "error");
     return;
   }
 
+  await loadWallet();
   await loadSharedMarkets();
 }
 
 function fromDatabaseMarket(row) {
   return {
     id: row.id,
+    ownerId: row.owner_id || "",
     question: row.question,
     deadline: toLocalInputDate(row.deadline),
     cutoff: toLocalInputDate(row.cutoff),
@@ -299,6 +368,8 @@ function fromDatabaseMarket(row) {
     terms: row.terms,
     status: row.status,
     outcome: row.outcome,
+    settledAt: row.settled_at || "",
+    settlementFeeTotal: Number(row.settlement_fee_total || 0),
     entries: (row.entries || []).map((entry) => ({
       id: entry.id,
       userId: entry.user_id || "",
@@ -409,58 +480,69 @@ function numberOf(id) {
 }
 
 function getPools(market) {
-  const yes = market.entries
-    .filter((entry) => entry.side === "YES")
-    .reduce((sum, entry) => sum + Number(entry.amount), 0);
-  const no = market.entries
-    .filter((entry) => entry.side === "NO")
-    .reduce((sum, entry) => sum + Number(entry.amount), 0);
-  const gross = yes + no;
-  const feeRate = (Number(market.platformFee) + Number(market.oddsRake)) / 100;
-  const net = market.outcome === "VOID" ? gross : gross * (1 - feeRate);
-
-  return { yes, no, gross, net, feeRate };
+  return marketMath.getPools(market);
 }
 
-function getOdds(market) {
-  const pools = getPools(market);
+function getTimelineState(market) {
+  const now = new Date();
+  const cutoff = market.cutoff ? new Date(market.cutoff) : null;
+  const deadline = market.deadline ? new Date(market.deadline) : null;
+  const bettingClosed = market.status !== "OPEN" || Boolean(cutoff && now >= cutoff);
+  const eventEnded = Boolean(deadline && now >= deadline);
+  const canResolve = market.status === "OPEN" && eventEnded;
+
   return {
-    yesOdds: pools.yes > 0 ? pools.net / pools.yes : 0,
-    noOdds: pools.no > 0 ? pools.net / pools.no : 0,
-    yesShare: pools.gross > 0 ? pools.yes / pools.gross : 0,
-    noShare: pools.gross > 0 ? pools.no / pools.gross : 0
+    now,
+    cutoff,
+    deadline,
+    bettingClosed,
+    eventEnded,
+    canJoin: market.status === "OPEN" && !bettingClosed,
+    canResolve
   };
 }
 
-function getPayout(market, entry) {
-  if (!market.outcome) return null;
-  if (market.outcome === "VOID") return entry.amount;
-  if (entry.side !== market.outcome) return 0;
-  if (entry.lockedPayout > 0) return entry.lockedPayout;
+function getOdds(market) {
+  return marketMath.getOdds(market);
+}
 
-  const pools = getPools(market);
-  const winningPool = market.outcome === "YES" ? pools.yes : pools.no;
-  return winningPool > 0 ? entry.amount + (entry.amount / winningPool) * losingPoolForSide(market, entry.side) * (1 - pools.feeRate) : entry.amount;
+function getPayout(market, entry) {
+  return marketMath.getPayout(market, entry);
 }
 
 function quoteLockedPayout(market, side, amount) {
-  const pools = getPools(market);
-  const samePool = side === "YES" ? pools.yes : pools.no;
-  const oppositePool = side === "YES" ? pools.no : pools.yes;
-  const profit = oppositePool > 0 ? (amount / (samePool + amount)) * oppositePool * (1 - pools.feeRate) : 0;
-  return amount + profit;
+  return marketMath.quoteLockedPayout(market, side, amount);
 }
 
 function quoteRead(market, side, amount) {
-  if (!amount || amount < market.minStake) return `Min stake ${money.format(market.minStake)}`;
+  const joinMessage = joinFormBlockReason(market, amount);
+  if (joinMessage) return joinMessage;
   const payout = quoteLockedPayout(market, side, amount);
   const profit = Math.max(0, payout - amount);
   return `Pays ${money.format(payout)} if ${side} wins (${money.format(profit)} profit)`;
 }
 
+function joinFormBlockReason(market, amount) {
+  const joinMessage = marketJoinBlockReason(market);
+  if (joinMessage) return joinMessage;
+  if (isSharedMode && !currentUserId) return "Sign in to use test credits.";
+  if (!amount || amount < market.minStake) return `Min stake ${money.format(market.minStake)}`;
+  if (isSharedMode && walletBalance === null) return "Loading test balance.";
+  if (isSharedMode && walletBalance !== null && amount > walletBalance) {
+    return `Balance too low: ${money.format(walletBalance)} available.`;
+  }
+  return "";
+}
+
+function marketJoinBlockReason(market) {
+  const timeline = getTimelineState(market);
+  if (market.status !== "OPEN") return "This bet is settled.";
+  if (timeline.bettingClosed) return "Betting is closed for this market.";
+  return "";
+}
+
 function losingPoolForSide(market, side) {
-  const pools = getPools(market);
-  return side === "YES" ? pools.no : pools.yes;
+  return marketMath.losingPoolForSide(market, side);
 }
 
 function sideForCurrentUser(market, fallbackName = currentDisplayName(), userId = currentUserId) {
@@ -484,8 +566,60 @@ function filteredMarkets() {
 }
 
 function render() {
+  renderWallet();
   renderStats();
   renderMarkets();
+}
+
+function renderWallet(errorMessage = walletError) {
+  if (walletBalanceRead) {
+    if (!isSharedMode) walletBalanceRead.textContent = "Local demo";
+    else if (!currentUserId) walletBalanceRead.textContent = "Sign in";
+    else if (errorMessage) walletBalanceRead.textContent = "Unavailable";
+    else walletBalanceRead.textContent = walletBalance === null ? "Loading..." : money.format(walletBalance);
+  }
+
+  if (!walletPanelBalance || !walletPanelRead || !walletTransactionsList) return;
+
+  if (!isSharedMode) {
+    walletPanelBalance.textContent = "Local demo mode";
+    walletPanelRead.textContent = "Configure Supabase to use shared test credits with friends.";
+    walletTransactionsList.replaceChildren();
+    return;
+  }
+
+  if (!currentUserId) {
+    walletPanelBalance.textContent = "Sign in for test credits";
+    walletPanelRead.textContent = "Shared bets use fake credits, not real money.";
+    walletTransactionsList.replaceChildren();
+    return;
+  }
+
+  walletPanelBalance.textContent = walletBalance === null ? "Loading..." : money.format(walletBalance);
+  walletPanelRead.textContent = errorMessage || "Fake credits let you test deposits, stakes, payouts, and void refunds without moving real money.";
+  walletTransactionsList.replaceChildren();
+
+  if (walletTransactions.length === 0) {
+    const empty = document.createElement("p");
+    empty.className = "terms";
+    empty.textContent = "No wallet activity yet.";
+    walletTransactionsList.append(empty);
+    return;
+  }
+
+  walletTransactions.forEach((transaction) => {
+    const row = document.createElement("div");
+    const amount = Number(transaction.amount || 0);
+    row.className = "wallet-transaction";
+    row.innerHTML = `
+      <div>
+        <strong>${escapeHtml(walletTransactionLabel(transaction.transaction_type))}</strong>
+        <span>${escapeHtml(transaction.note || formatDate(transaction.created_at))}</span>
+      </div>
+      <strong class="${amount < 0 ? "debit" : "credit"}">${amount < 0 ? "-" : "+"}${money.format(Math.abs(amount))}</strong>
+    `;
+    walletTransactionsList.append(row);
+  });
 }
 
 function renderStats() {
@@ -532,9 +666,14 @@ function renderMarkets() {
     const amountInput = card.querySelector(".amount-input");
     const quoteOutput = card.querySelector(".quote-read");
     const resolveRow = card.querySelector(".resolve-row");
+    const resolveActions = card.querySelector(".resolve-actions");
     const ledger = card.querySelector(".ledger");
     const inviteRead = card.querySelector(".invite-read");
     const terms = card.querySelector(".terms");
+    const timeline = getTimelineState(market);
+    const resolveButtons = [...card.querySelectorAll("[data-outcome]")];
+    const joinButton = entryForm.querySelector("button[type='submit']");
+    const isOwner = !isSharedMode || Boolean(currentUserId && market.ownerId === currentUserId);
 
     card.querySelector("h3").textContent = market.question;
     card.querySelector(".cutoff").textContent = formatDate(market.cutoff);
@@ -547,7 +686,8 @@ function renderMarkets() {
     card.querySelector(".no-odds").textContent = `NO pool | ${formatProbability(odds.noShare)} implied`;
     card.querySelector(".payout-read").textContent = payoutRead(market);
 
-    statusPill.textContent = market.outcome ? `${market.outcome} resolved` : market.status;
+    statusPill.textContent = marketStatusLabel(market, timeline);
+    statusPill.classList.toggle("closed", market.status === "OPEN" && timeline.bettingClosed);
     statusPill.classList.toggle("void", market.outcome === "VOID");
     statusPill.classList.toggle("settled", market.status === "SETTLED" && market.outcome !== "VOID");
     visibilityPill.textContent = market.visibility === "INVITE_ONLY" ? "Invite only" : "Public";
@@ -577,7 +717,11 @@ function renderMarkets() {
     amountInput.placeholder = `$${market.minStake}+`;
 
     const updateQuote = () => {
-      quoteOutput.textContent = quoteRead(market, sideSelect.value, Number(amountInput.value));
+      const amount = Number(amountInput.value);
+      const blockReason = joinFormBlockReason(market, amount);
+      quoteOutput.textContent = blockReason || quoteRead(market, sideSelect.value, amount);
+      joinButton.disabled = Boolean(blockReason);
+      joinButton.textContent = timeline.canJoin ? "Join" : "Betting closed";
     };
 
     const existingSide = sideForCurrentUser(market);
@@ -585,15 +729,23 @@ function renderMarkets() {
       sideSelect.value = existingSide;
       sideSelect.disabled = true;
     }
+    if (!timeline.canJoin) {
+      sideSelect.disabled = true;
+      amountInput.disabled = true;
+    }
     updateQuote();
     sideSelect.addEventListener("change", updateQuote);
     amountInput.addEventListener("input", updateQuote);
 
-    if (isDetailPage) entryForm.hidden = market.status !== "OPEN";
+    if (isDetailPage) entryForm.hidden = market.status !== "OPEN" && market.status !== "";
     entryForm.addEventListener("submit", async (event) => {
       event.preventDefault();
       const amount = Number(amountInput.value);
-      if (amount < market.minStake) return;
+      const joinMessage = joinFormBlockReason(market, amount);
+      if (joinMessage) {
+        setConnection(joinMessage, "error");
+        return;
+      }
 
       const entry = {
         id: crypto.randomUUID(),
@@ -619,8 +771,9 @@ function renderMarkets() {
       }
     });
 
-    card.querySelectorAll("[data-outcome]").forEach((button) => {
-      button.disabled = market.status !== "OPEN";
+    if (resolveActions) resolveActions.hidden = !isOwner;
+    resolveButtons.forEach((button) => {
+      button.disabled = !(isOwner && timeline.canResolve);
       button.addEventListener("click", async () => {
         if (isSharedMode) {
           await resolveSharedMarket(market, button.dataset.outcome);
@@ -668,6 +821,8 @@ function formatDate(value) {
   if (!value) return "Not set";
   return new Intl.DateTimeFormat("en-AU", {
     day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
     month: "short",
     year: "numeric"
   }).format(new Date(value));
@@ -682,6 +837,15 @@ function toLocalInputDate(value) {
 function formatProbability(share) {
   if (!Number.isFinite(share) || share <= 0) return "No line";
   return `${Math.round(share * 100)}%`;
+}
+
+function walletTransactionLabel(type) {
+  return {
+    INITIAL_GRANT: "Starting credits",
+    STAKE: "Stake placed",
+    PAYOUT: "Payout credited",
+    REFUND: "Stake refunded"
+  }[type] || "Wallet update";
 }
 
 function renderInviteRead(card, market) {
@@ -709,10 +873,39 @@ function createInviteCode() {
 function payoutRead(market) {
   const pools = getPools(market);
   const odds = getOdds(market);
-  if (market.outcome === "VOID") return "Void: all stakes return.";
-  if (market.outcome) return `${market.outcome} resolved. Winning entries pay at their locked payout.`;
+  const timeline = getTimelineState(market);
+  if (market.outcome === "VOID") return `Void resolved${market.settledAt ? ` ${formatDate(market.settledAt)}` : ""}. All stakes return as test credits.`;
+  if (market.outcome) {
+    const retained = Number(market.settlementFeeTotal || 0);
+    return `${market.outcome} resolved${market.settledAt ? ` ${formatDate(market.settledAt)}` : ""}. Winners were credited; ${money.format(retained)} retained as virtual fees/unallocated credits.`;
+  }
+  if (timeline.canResolve) return "Event deadline passed. Waiting for the umpire to resolve the result.";
+  if (timeline.bettingClosed) return "Betting is closed. Existing entries are locked until the result is decided.";
   if (!pools.gross) return "Market line will appear once friends join.";
   return `Pools: YES ${money.format(pools.yes)} / NO ${money.format(pools.no)}. Line: YES ${formatProbability(odds.yesShare)} / NO ${formatProbability(odds.noShare)} implied.`;
+}
+
+function marketStatusLabel(market, timeline = getTimelineState(market)) {
+  if (market.outcome) return `${market.outcome} resolved`;
+  if (market.status === "SETTLED") return "Settled";
+  if (timeline.canResolve) return "Awaiting result";
+  if (timeline.bettingClosed) return "Betting closed";
+  return "Open";
+}
+
+function validateMarket(market) {
+  const cutoff = new Date(market.cutoff);
+  const deadline = new Date(market.deadline);
+  const now = new Date();
+
+  if (!market.question) return "Add a clear question before creating the bet.";
+  if (!(cutoff instanceof Date) || Number.isNaN(cutoff.getTime())) return "Choose a valid betting cutoff.";
+  if (!(deadline instanceof Date) || Number.isNaN(deadline.getTime())) return "Choose a valid event deadline.";
+  if (cutoff <= now) return "The betting cutoff needs to be in the future.";
+  if (deadline <= cutoff) return "The event deadline needs to be after the betting cutoff.";
+  if (!market.umpire) return "Add an umpire so everyone knows who resolves the outcome.";
+  if (market.minStake < 1) return "Minimum stake must be at least $1.";
+  return "";
 }
 
 function setConnection(message, state) {

@@ -12,6 +12,7 @@ async function syncAccountUi() {
   const accountName = document.querySelector("#accountName");
   const authAction = document.querySelector("#authAction");
   const signOutButton = document.querySelector("#signOutButton");
+  const walletBalance = document.querySelector("#walletBalance");
 
   if (!accountClient) {
     updateAccountDisplay("Guest", false);
@@ -42,6 +43,7 @@ async function syncAccountUi() {
 
   function updateAccountDisplay(name, signedIn) {
     if (accountName) accountName.textContent = name;
+    if (walletBalance) walletBalance.textContent = signedIn ? "Loading..." : "Sign in";
     if (authAction) {
       authAction.textContent = signedIn ? "Account" : "Sign In";
       authAction.href = "auth.html";

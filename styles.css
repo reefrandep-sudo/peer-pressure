@@ -131,6 +131,7 @@ h3 {
 .identity-card,
 .panel,
 .market-card,
+.wallet-panel,
 .stats-grid article {
   background: var(--panel);
   border: 1px solid var(--line);
@@ -225,6 +226,53 @@ textarea {
   margin-bottom: 0;
   color: var(--muted);
   font-weight: 700;
+}
+
+.wallet-panel {
+  display: grid;
+  grid-template-columns: minmax(220px, 0.7fr) minmax(0, 1.3fr);
+  gap: 16px;
+  align-items: start;
+  margin-bottom: 18px;
+  padding: 18px;
+}
+
+.wallet-panel h2 {
+  margin-bottom: 8px;
+  font-size: 1.65rem;
+}
+
+.wallet-transactions {
+  display: grid;
+  gap: 8px;
+}
+
+.wallet-transaction {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 10px;
+}
+
+.wallet-transaction strong {
+  font-size: 0.9rem;
+}
+
+.wallet-transaction span {
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-weight: 750;
+}
+
+.wallet-transaction .credit {
+  color: var(--green);
+}
+
+.wallet-transaction .debit {
+  color: var(--red);
 }
 
 .workspace,
@@ -451,9 +499,21 @@ textarea {
   color: var(--amber);
 }
 
+.status-pill.closed {
+  background: var(--amber-soft);
+  color: var(--amber);
+}
+
 .status-pill.void {
   background: var(--red-soft);
   color: var(--red);
+}
+
+button:disabled,
+input:disabled,
+select:disabled {
+  cursor: not-allowed;
+  opacity: 0.65;
 }
 
 .follow-button {
@@ -638,6 +698,7 @@ dd {
   }
 
   .auth-grid,
+  .wallet-panel,
   .stats-grid {
     grid-template-columns: 1fr;
   }
